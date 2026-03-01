@@ -98,12 +98,15 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, include_triggers: bool = True) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
         This is used for progressive loading - the agent can read the full
         skill content using read_file when needed.
+
+        Args:
+            include_triggers: If True, include trigger keywords for lazy loading.
 
         Returns:
             XML-formatted skills summary.
@@ -126,6 +129,14 @@ class SkillsLoader:
             lines.append(f"  <skill available=\"{str(available).lower()}\">")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
+            
+            # Add trigger keywords for lazy loading
+            if include_triggers:
+                triggers = skill_meta.get("triggers", [])
+                if triggers:
+                    triggers_str = ", ".join(triggers)
+                    lines.append(f"    <triggers>{escape_xml(triggers_str)}</triggers>")
+            
             lines.append(f"    <location>{path}</location>")
 
             # Show missing requirements for unavailable skills
@@ -138,6 +149,32 @@ class SkillsLoader:
         lines.append("</skills>")
 
         return "\n".join(lines)
+    
+    def match_skills_by_keywords(self, message: str) -> list[str]:
+        """
+        Match skills by keywords in user message.
+
+        Args:
+            message: User message to match against.
+
+        Returns:
+            List of matched skill names.
+        """
+        matched = []
+        message_lower = message.lower()
+        
+        for skill in self.list_skills(filter_unavailable=True):
+            skill_meta = self._get_skill_meta(skill["name"])
+            triggers = skill_meta.get("triggers", [])
+            
+            # Check if any trigger keyword matches
+            for trigger in triggers:
+                if trigger.lower() in message_lower:
+                    if skill["name"] not in matched:
+                        matched.append(skill["name"])
+                    break
+        
+        return matched
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""

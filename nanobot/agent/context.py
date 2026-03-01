@@ -38,7 +38,11 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        user_message: str | None = None,
+    ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -50,19 +54,40 @@ class ContextBuilder:
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
+        # Load always-active skills
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
+        # Lazy-load skills based on user message keywords
+        matched_skills = []
+        if user_message:
+            matched_skills = self.skills.match_skills_by_keywords(user_message)
+            # Remove already-loaded always_skills
+            matched_skills = [s for s in matched_skills if s not in always_skills]
+        
+        # Also load explicitly requested skills
+        if skill_names:
+            for name in skill_names:
+                if name not in always_skills and name not in matched_skills:
+                    matched_skills.append(name)
+        
+        if matched_skills:
+            matched_content = self.skills.load_skills_for_context(matched_skills)
+            if matched_content:
+                parts.append(f"# Matched Skills\n\n{matched_content}")
+
+        # Skills summary (compact index)
+        skills_summary = self.skills.build_skills_summary(include_triggers=True)
         if skills_summary:
             parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
+<skills>
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
@@ -128,7 +153,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, current_message)},
             *history,
             {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
             {"role": "user", "content": self._build_user_content(current_message, media)},
