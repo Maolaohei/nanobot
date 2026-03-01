@@ -15,7 +15,22 @@ from nanobot.agent.skills import SkillsLoader
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    # Default bootstrap files (can be overridden by config)
+    DEFAULT_BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    
+    # Load custom config if exists
+    _config_path = Path.home() / ".nanobot" / "context-override.json"
+    if _config_path.exists():
+        try:
+            import json
+            with open(_config_path) as f:
+                _cfg = json.load(f)
+            BOOTSTRAP_FILES = _cfg.get("bootstrap_files", DEFAULT_BOOTSTRAP_FILES)
+        except Exception:
+            BOOTSTRAP_FILES = DEFAULT_BOOTSTRAP_FILES
+    else:
+        BOOTSTRAP_FILES = DEFAULT_BOOTSTRAP_FILES
+    
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
     def __init__(self, workspace: Path):
