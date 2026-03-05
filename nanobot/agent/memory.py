@@ -27,12 +27,15 @@ _SAVE_MEMORY_TOOL = [
                     "history_entry": {
                         "type": "string",
                         "description": "A paragraph (2-5 sentences) summarizing key events/decisions/topics. "
-                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
+                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search. "
+                        "Must include: task status (what was being done), pending items (what needs follow-up), "
+                        "and key decisions (what was decided/agreed).",
                     },
                     "memory_update": {
                         "type": "string",
                         "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "facts plus new ones. Return unchanged if nothing new. "
+                        "Prioritize: user preferences, project context, important decisions, task states.",
                     },
                 },
                 "required": ["history_entry", "memory_update"],
@@ -103,6 +106,12 @@ class MemoryStore:
 
         current_memory = self.read_long_term()
         prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+
+## Extraction Guidelines
+When generating history_entry, you MUST include:
+1. **Task Status**: What task was being performed (e.g., "adjusting context compression", "downloading Pixiv images")
+2. **Pending Items**: What needs follow-up or is incomplete (e.g., "awaiting user confirmation", "retry scheduled")
+3. **Key Decisions**: What was decided/agreed (e.g., "user selected 方案 C", "Token threshold set to 14000")
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
