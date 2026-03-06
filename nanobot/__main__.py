@@ -2,7 +2,13 @@
 Entry point for running nanobot as a module: python -m nanobot
 """
 
-from nanobot.cli.commands import app
-
-if __name__ == "__main__":
-    app()
++from nanobot.utils.log_setup import setup_logging_json
+ from nanobot.cli.commands import app
+ 
+ if __name__ == "__main__":
++    # Minimal structured logging by default
++    try:
++        setup_logging_json()
++    except Exception:
++        pass
+     app()
