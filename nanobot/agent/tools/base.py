@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from nanobot.utils.errors import ErrorCodes, ToolError, ErrorInfo
+
 
 class Tool(ABC):
     """
@@ -60,6 +62,11 @@ class Tool(ABC):
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
         return self._validate(params, {**schema, "type": "object"}, "")
+
+    def validate_or_raise(self, params: dict[str, Any]) -> None:
+        errs = self.validate_params(params)
+        if errs:
+            raise ToolError(ErrorInfo(code=ErrorCodes.TOOL_VALIDATE, message="; ".join(errs)))
 
     def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"
