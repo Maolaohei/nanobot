@@ -90,6 +90,24 @@ class SimpleCache:
         self._meta_path(url).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return CacheEntry(url=url, status=status, headers=meta["headers"], body_path=str(body_p), stored_at=meta["stored_at"], ttl=ttl)
 
+    def refresh(self, url: str, headers: dict[str, str] | None = None) -> None:
+        """Refresh stored_at and optionally safe headers after 304 revalidation."""
+        meta_p = self._meta_path(url)
+        if not meta_p.exists():
+            return
+        try:
+            meta = json.loads(meta_p.read_text(encoding="utf-8"))
+            meta["stored_at"] = time.time()
+            if headers:
+                safe = {k.lower(): v for k, v in headers.items() if k.lower() in SAFE_HEADERS}
+                meta_headers = meta.get("headers", {})
+                meta_headers.update(safe)
+                meta["headers"] = meta_headers
+                meta["ttl"] = self._ttl_from_headers(meta_headers)
+            meta_p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.debug("cache refresh failed for {}: {}", url, e)
+
     def validators(self, entry: CacheEntry) -> dict[str, str]:
         hdrs: dict[str, str] = {}
         etag = entry.headers.get("etag")
