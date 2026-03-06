@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +14,7 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool
 from nanobot.utils.http import HttpClientFactory, request as http_request
 from nanobot.utils.cache import SimpleCache, use_cache
+from nanobot.utils.errors import ErrorCodes, error_json, map_exception
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -73,10 +75,10 @@ class WebSearchTool(Tool):
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         if not self.api_key:
-            return (
-                "Error: Brave Search API key not configured. Set it in "
-                "~/.nanobot/config.json under tools.web.search.apiKey "
-                "(or export BRAVE_API_KEY), then restart the gateway."
+            return error_json(
+                ErrorCodes.INVALID_PARAMS,
+                "Brave Search API key not configured",
+                {"hint": "Set tools.web.search.apiKey or export BRAVE_API_KEY"},
             )
 
         try:
@@ -100,12 +102,10 @@ class WebSearchTool(Tool):
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
-        except httpx.ProxyError as e:
-            logger.error("WebSearch proxy error: {}", e)
-            return f"Proxy error: {e}"
         except Exception as e:
+            info = map_exception(e)
             logger.error("WebSearch error: {}", e)
-            return f"Error: {e}"
+            return error_json(info.code, info.message, info.details)
 
 
 class WebFetchTool(Tool):
@@ -135,7 +135,7 @@ class WebFetchTool(Tool):
         max_chars = maxChars or self.max_chars
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
-            return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
+            return error_json(ErrorCodes.INVALID_PARAMS, f"URL validation failed: {error_msg}", {"url": url})
 
         try:
             logger.debug("WebFetch: {}", "proxy enabled" if self.proxy else "direct connection")
@@ -210,12 +210,10 @@ class WebFetchTool(Tool):
                 "length": len(text),
                 "text": text,
             }, ensure_ascii=False)
-        except httpx.ProxyError as e:
-            logger.error("WebFetch proxy error for {}: {}", url, e)
-            return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)
         except Exception as e:
+            info = map_exception(e)
             logger.error("WebFetch error for {}: {}", url, e)
-            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+            return error_json(info.code, info.message, {**(info.details or {}), "url": url})
 
     def _to_markdown(self, html: str) -> str:
         """Convert HTML to markdown."""

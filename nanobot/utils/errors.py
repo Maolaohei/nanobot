@@ -37,3 +37,49 @@ class ToolError(Exception):
         if self.info.details:
             payload["details"] = self.info.details
         return json.dumps(payload, ensure_ascii=False)
+
+
+def error_json(code: str, message: str, details: Optional[dict[str, Any]] = None) -> str:
+    """Serialize an error payload to JSON using the unified shape."""
+    return ToolError(ErrorInfo(code=code, message=message, details=details)).to_json()
+
+
+def map_exception(exc: Exception) -> ErrorInfo:
+    """Map common exceptions into unified ErrorInfo.
+
+    - httpx.ProxyError      -> ERR_HTTP_PROXY
+    - httpx.TimeoutException-> ERR_HTTP_TIMEOUT
+    - httpx.HTTPStatusError -> ERR_HTTP_STATUS (details: status, url)
+    - ToolError             -> passthrough
+    - otherwise             -> ERR_RUNTIME
+    """
+    # Avoid importing heavy deps at module import time
+    try:
+        import httpx  # type: ignore
+    except Exception:  # pragma: no cover
+        httpx = None  # type: ignore
+
+    if isinstance(exc, ToolError):
+        return exc.info
+
+    if httpx is not None:
+        if isinstance(exc, getattr(httpx, "ProxyError", tuple())):
+            return ErrorInfo(code=ErrorCodes.HTTP_PROXY, message=str(exc))
+        if isinstance(exc, getattr(httpx, "TimeoutException", tuple())):
+            return ErrorInfo(code=ErrorCodes.HTTP_TIMEOUT, message=str(exc))
+        if isinstance(exc, getattr(httpx, "HTTPStatusError", tuple())):
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            url = None
+            try:
+                if getattr(exc, "request", None) is not None:
+                    url = str(exc.request.url)  # type: ignore[attr-defined]
+                elif getattr(exc, "response", None) is not None:
+                    url = str(exc.response.request.url)  # type: ignore[attr-defined]
+            except Exception:
+                url = None
+            details = {"status": status}
+            if url:
+                details["url"] = url
+            return ErrorInfo(code=ErrorCodes.HTTP_STATUS, message=str(exc), details=details)
+
+    return ErrorInfo(code=ErrorCodes.RUNTIME_ERROR, message=str(exc) or exc.__class__.__name__)
