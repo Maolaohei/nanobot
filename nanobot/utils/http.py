@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 from loguru import logger
+
+from nanobot.utils.cache import SimpleCache, CACHEABLE_CT
 
 SAFE_STATUS_NO_RETRY = {401, 403, 404, 412}
 DEFAULT_TIMEOUT = httpx.Timeout(30.0)
@@ -12,6 +16,23 @@ DEFAULT_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=100)
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36",
 }
+
+# Global cache (enabled by default). Toggle via env NANOBOT_CACHE_ENABLED=false
+_GLOBAL_CACHE: SimpleCache | None = None
+
+
+def _cache_enabled_env() -> bool:
+    return os.environ.get("NANOBOT_CACHE_ENABLED", "true").lower() not in {"0", "false", "no"}
+
+
+def _get_global_cache() -> SimpleCache | None:
+    global _GLOBAL_CACHE
+    enabled = _cache_enabled_env()
+    if enabled and _GLOBAL_CACHE is None:
+        _GLOBAL_CACHE = SimpleCache()
+    if not enabled and _GLOBAL_CACHE is not None:
+        _GLOBAL_CACHE = None
+    return _GLOBAL_CACHE
 
 
 class HttpClientFactory:
@@ -66,6 +87,13 @@ class HttpClientFactory:
         return self._wrap(client)
 
 
+def _cached_response(url: str, entry, text: str) -> httpx.Response:
+    req = httpx.Request("GET", url)
+    resp = httpx.Response(status_code=entry.status, headers=entry.headers, request=req, content=text.encode("utf-8"))
+    resp.encoding = "utf-8"
+    return resp
+
+
 async def request(
     method: str,
     url: str,
@@ -81,22 +109,71 @@ async def request(
     - Applies proxy if provided
     - Honors SAFE_STATUS_NO_RETRY by not retrying
     - Logs failures with method/url/status
+    - Global cache for GET text/html/json/plain is enabled by default
     """
     owns_client = client is None
+    headers = headers.copy() if headers else {}
+
+    # Global cache: fresh-hit short circuit or add validators for revalidation
+    cache_entry = None
+    _GLOBAL = _get_global_cache()
+    if _GLOBAL and method.upper() == "GET" and headers.get("Cache-Control", "").lower() != "no-cache":
+        cache_entry = _GLOBAL.get(url)
+        if cache_entry and not cache_entry.expired():
+            try:
+                text = Path(cache_entry.body_path).read_text(encoding="utf-8", errors="ignore")
+                logger.debug("HTTP cache hit fresh: {}", url)
+                return _cached_response(url, cache_entry, text)
+            except Exception as ce:
+                logger.debug("HTTP cache read failed for {}: {}", url, ce)
+        elif cache_entry:
+            # stale: add validators
+            validators = {}
+            if et := cache_entry.headers.get("etag"):
+                validators["If-None-Match"] = et
+            if lm := cache_entry.headers.get("last-modified"):
+                validators["If-Modified-Since"] = lm
+            headers.update({k: v for k, v in validators.items() if k not in headers})
+
     if client is None:
         client = httpx.AsyncClient(
             timeout=DEFAULT_TIMEOUT,
             limits=DEFAULT_LIMITS,
-            headers={**DEFAULT_HEADERS, **(headers or {})},
+            headers={**DEFAULT_HEADERS, **headers},
             proxy=proxy,
             follow_redirects=True,
         )
+        # Note: headers passed to request() still apply below
     try:
         r = await client.request(method.upper(), url, headers=headers, **kwargs)
+
+        # Revalidation: 304 => serve cached entity and refresh metadata
+        if r.status_code == 304 and cache_entry and _GLOBAL:
+            try:
+                _GLOBAL.refresh(url, dict(r.headers))
+                text = Path(cache_entry.body_path).read_text(encoding="utf-8", errors="ignore")
+                logger.debug("HTTP cache revalidated (304): {}", url)
+                return _cached_response(url, cache_entry, text)
+            except Exception as ce:
+                logger.debug("HTTP cache 304 handling failed for {}: {}", url, ce)
+
+        # No-retry statuses return directly
         if r.status_code in SAFE_STATUS_NO_RETRY:
             logger.warning("HTTP no-retry {} {} -> {}", method, url, r.status_code)
             return r
+
         r.raise_for_status()
+
+        # Store cacheable content
+        if _GLOBAL and method.upper() == "GET":
+            ctype = r.headers.get("content-type", "")
+            if any(t in ctype for t in CACHEABLE_CT) or ctype.startswith("text/"):
+                try:
+                    text = r.text
+                    _GLOBAL.put(url, r.status_code, {k.lower(): v for k, v in r.headers.items()}, text)
+                except Exception as ce:
+                    logger.debug("HTTP cache put failed for {}: {}", url, ce)
+
         return r
     except httpx.ProxyError as e:
         logger.error("HTTP proxy error for {} {}: {}", method, url, e)
