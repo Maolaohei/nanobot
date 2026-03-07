@@ -328,6 +328,15 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class FeatureFlags(Base):
+    """Global feature flags (env-overridable)."""
+
+    structured_logging: bool = True
+    http_middleware: bool = True
+    enable_tracing: bool = False
+    enforce_precommit: bool = True
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -336,6 +345,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    features: FeatureFlags = Field(default_factory=FeatureFlags)
 
     @property
     def workspace_path(self) -> Path:
