@@ -2,15 +2,32 @@
 
 import base64
 import mimetypes
+import os
 import platform
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.agent.hot_memory import HotMemoryStore  # added
+from nanobot.agent.facts_index import load_index, select_relevant_facts  # added
 from nanobot.utils.helpers import detect_image_mime
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return str(v).lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except Exception:
+        return default
 
 
 class ContextBuilder:
@@ -38,22 +55,128 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self.hot = HotMemoryStore(workspace)  # added
 
     def build_system_prompt(
         self,
         skill_names: list[str] | None = None,
         user_message: str | None = None,
+        *,
+        concise: bool | None = None,
+        token_budget: int | None = None,
+        tool_first: bool | None = None,
+        session_key: str | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, memory, skills, and hints."""
         parts = [self._get_identity()]
+
+        # Env feature toggles
+        concise = concise if concise is not None else _env_bool("NANOBOT_CONCISE_MODE", True)
+        tool_first = tool_first if tool_first is not None else _env_bool("NANOBOT_TOOL_FIRST", True)
+        token_budget = token_budget if token_budget is not None else _env_int("NANOBOT_TOKEN_BUDGET", 4096)
+
+        # Guidance block (kept short to save tokens)
+        guide_lines = []
+        if concise:
+            guide_lines.append("- 回复简洁，给结论与要点，非必要不展开推理")
+        if tool_first:
+            guide_lines.append("- 能用工具解决的先用工具，再总结")
+        if token_budget:
+            guide_lines.append(f"- 上下文预算约 {token_budget} tokens，超预算请裁剪不相关信息")
+        if guide_lines:
+            parts.append("# Guidance\n\n" + "\n".join(guide_lines))
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
 
+        # Memory injector master switch and budget
+        mem_injector_enabled = _env_bool("NANOBOT_MEMORY_INJECTOR", True)
+        total_budget = _env_int("NANOBOT_MEMORY_BUDGET_MAX_LINES", 8)
+
+        hot_lines_out: list[str] = []
+        facts_lines_out: list[str] = []
+
+        # Hot-memory brief with relevance×freshness budgeter (compact)
+        hot_enabled = mem_injector_enabled and _env_bool("NANOBOT_MEMORY_HOT_ENABLED", True)
+        if session_key and hot_enabled:
+            brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", 5)
+            try:
+                hm = self.hot.load(session_key)
+                lines: list[str] = []
+                if hm.goals:
+                    lines.append("Goal: " + "; ".join(hm.goals[:2]))
+                # score facts by relevance tokens + freshness bonus (last 72h)
+                facts = list(hm.facts or [])
+                msg = (user_message or "").strip()
+                tokens: list[str] = []
+                cur: list[str] = []
+                for ch in msg:
+                    if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"):
+                        cur.append(ch)
+                    else:
+                        if len(cur) >= 2:
+                            tokens.append("".join(cur))
+                        cur = []
+                if len(cur) >= 2:
+                    tokens.append("".join(cur))
+                now = datetime.now()
+                def _score(f: dict[str, Any]) -> float:
+                    base = f"{f.get('k','')} {f.get('v','')}"
+                    s = 0
+                    for t in tokens:
+                        if t and t in base:
+                            s += 2 if len(t) > 3 else 1
+                    ts = f.get("ts")
+                    try:
+                        dt = datetime.fromisoformat(str(ts)) if ts else None
+                    except Exception:
+                        dt = None
+                    if dt and (now - dt) <= timedelta(days=3):
+                        s += 1.0
+                    return float(s)
+                if facts:
+                    ranked = sorted(facts, key=_score, reverse=True)
+                    for f in ranked[:brief_limit]:
+                        lines.append(f"{f.get('k')}: {f.get('v')}")
+                if hm.constraints:
+                    lines.append("Constraints: " + "; ".join(hm.constraints[:2]))
+                if hm.todos:
+                    lines.append("Next: " + "; ".join(hm.todos[:2]))
+                if lines:
+                    hot_lines_out = [f"- {l}" for l in lines[: brief_limit + 3]]
+            except Exception:
+                # best-effort
+                pass
+
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+
+        # Relevant facts (from facts index)
+        facts_enabled = mem_injector_enabled and _env_bool("NANOBOT_MEMORY_FACTS_ENABLED", True)
+        try:
+            if facts_enabled:
+                facts = load_index(self.workspace)
+                if facts:
+                    facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
+                    sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
+                    if sel:
+                        facts_lines_out = [f"- {f.k}: {f.v}" for f in sel]
+        except Exception:
+            # best-effort; ignore indexing failures
+            pass
+
+        # Enforce combined memory injection budget by trimming facts first
+        if total_budget > 0:
+            remain = max(0, total_budget - len(hot_lines_out))
+            if len(facts_lines_out) > remain:
+                facts_lines_out = facts_lines_out[:remain]
+
+        if hot_lines_out:
+            parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(hot_lines_out))
+        if facts_lines_out:
+            parts.append("# Relevant Facts\n\n" + "\n".join(facts_lines_out))
 
         # Load always-active skills
         always_skills = self.skills.get_always_skills()
@@ -143,6 +266,39 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return "\n\n".join(parts) if parts else ""
 
+    @staticmethod
+    def _summarize_history_brief(history: list[dict[str, Any]], keep_recent: int = 15, max_chars: int = 600) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Return (kept_history, summary_user_msg?).
+
+        Builds a compact 2–4 line brief for older messages and keeps only the last keep_recent.
+        The brief is injected as a runtime-context user message to avoid instruction pollution.
+        """
+        if not history or len(history) <= keep_recent:
+            return history, None
+        older = history[:-keep_recent]
+        kept = history[-keep_recent:]
+        # Find last user and assistant contents in older slice
+        def _last_of(role: str) -> str:
+            for m in reversed(older):
+                if m.get("role") == role and isinstance(m.get("content"), str):
+                    return str(m.get("content") or "")
+            return ""
+        intent = _last_of("user")
+        outcome = _last_of("assistant")
+        def _clip(s: str, n: int) -> str:
+            s = s.replace(self._RUNTIME_CONTEXT_TAG, "").strip()
+            return (s[: n - 1] + "…") if len(s) > n else s
+        lines = [
+            f"Earlier summary: {len(older)} messages compressed",
+        ]
+        if intent:
+            lines.append(f"- Intent: {_clip(intent, max_chars // 2)}")
+        if outcome:
+            lines.append(f"- Outcome: {_clip(outcome, max_chars // 2)}")
+        brief_text = self._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
+        summary_msg = {"role": "user", "content": brief_text}
+        return kept, summary_msg
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -151,6 +307,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        *,
+        keep_recent: int = 15,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
@@ -163,11 +321,25 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
-        return [
-            {"role": "system", "content": self.build_system_prompt(skill_names, current_message)},
-            *history,
-            {"role": "user", "content": merged},
+        # Env override for keep_recent window
+        keep_recent = _env_int("NANOBOT_HISTORY_KEEP_RECENT", keep_recent)
+
+        # Compress long history into a short brief and keep last K messages
+        kept_history, summary_msg = self._summarize_history_brief(history or [], keep_recent=keep_recent)
+
+        # Build with concise/tool-first hints and include hot-memory by session key
+        session_key = f"{channel}:{chat_id}" if channel and chat_id else None
+        system_prompt = self.build_system_prompt(
+            skill_names, current_message, concise=None, token_budget=None, tool_first=None, session_key=session_key,
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
         ]
+        if summary_msg:
+            messages.append(summary_msg)
+        messages.extend(kept_history)
+        messages.append({"role": "user", "content": merged})
+        return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

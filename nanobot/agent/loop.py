@@ -26,6 +26,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+from nanobot.metrics import inc
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -200,6 +201,14 @@ class AgentLoop:
                 reasoning_effort=self.reasoning_effort,
             )
 
+            # Usage counters (best-effort)
+            try:
+                if isinstance(response.usage, dict):
+                    inc("tokens_prompt", response.usage.get("prompt_tokens", 0))
+                    inc("tokens_response", response.usage.get("completion_tokens", 0))
+            except Exception:
+                pass
+
             if response.has_tool_calls:
                 if on_progress:
                     thoughts = [
@@ -355,6 +364,7 @@ class AgentLoop:
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                keep_recent=self.memory_window,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -431,6 +441,7 @@ class AgentLoop:
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            keep_recent=self.memory_window,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -444,6 +455,22 @@ class AgentLoop:
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
+
+        # Round-level metrics logging (best-effort)
+        try:
+            from nanobot.metrics import snapshot
+            m = snapshot()
+            tp, tr = m.get("tokens_prompt", 0), m.get("tokens_response", 0)
+            http_calls = m.get("http_external_calls", 0)
+            http_hit = m.get("http_cache_hit", 0)
+            http_reval = m.get("http_cache_revalidated", 0)
+            hit_ratio = (http_hit + http_reval) / http_calls if http_calls else 0.0
+            logger.info(
+                "metrics: tokens_prompt={}, tokens_response={}, http_calls={}, hit_ratio={:.2f}",
+                tp, tr, http_calls, hit_ratio,
+            )
+        except Exception:
+            pass
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

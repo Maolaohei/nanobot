@@ -67,6 +67,7 @@ class WebSearchTool(Tool):
         self.max_results = max_results
         self.proxy = proxy
         self._http_factory = HttpClientFactory(proxy=proxy, rate_limit=60)
+        self._cache = SimpleCache()  # add short-TTL cache for identical queries
 
     @property
     def api_key(self) -> str:
@@ -84,6 +85,13 @@ class WebSearchTool(Tool):
         try:
             n = min(max(count or self.max_results, 1), 10)
             logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
+            # Normalize key and try cache first
+            key_url = f"https://api.search.brave.com/res/v1/web/search?q={query}&count={n}"
+            short_cache = self._cache
+            should_short_circuit, entry, cached_text, _ = use_cache(short_cache, lambda h: None, key_url)
+            if should_short_circuit and cached_text is not None:
+                return cached_text
+
             client = self._http_factory.create()
             r = await http_request(
                 "GET",
@@ -94,14 +102,22 @@ class WebSearchTool(Tool):
 
             results = r.json().get("web", {}).get("results", [])[:n]
             if not results:
-                return f"No results for: {query}"
+                text = f"No results for: {query}"
+                short_cache.put(key_url, r.status_code, {"cache-control": "max-age=60"}, text)
+                return text
 
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results, 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
-            return "\n".join(lines)
+            text = "\n".join(lines)
+            # Cache for 60s to dedupe repeated identical searches
+            try:
+                short_cache.put(key_url, r.status_code, {"cache-control": "max-age=60"}, text)
+            except Exception:
+                pass
+            return text
         except Exception as e:
             info = map_exception(e)
             logger.error("WebSearch error: {}", e)
