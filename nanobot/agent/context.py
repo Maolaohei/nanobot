@@ -2,6 +2,7 @@
 
 import base64
 import mimetypes
+import os
 import platform
 import time
 from datetime import datetime
@@ -13,6 +14,20 @@ from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.hot_memory import HotMemoryStore  # added
 from nanobot.agent.facts_index import load_index, select_relevant_facts  # added
 from nanobot.utils.helpers import detect_image_mime
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return str(v).lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except Exception:
+        return default
 
 
 class ContextBuilder:
@@ -55,6 +70,11 @@ class ContextBuilder:
         """Build the system prompt from identity, bootstrap files, memory, skills, and hints."""
         parts = [self._get_identity()]
 
+        # Env feature toggles
+        concise = concise if concise is not None else _env_bool("NANOBOT_CONCISE_MODE", True)
+        tool_first = tool_first if tool_first is not None else _env_bool("NANOBOT_TOOL_FIRST", True)
+        token_budget = token_budget if token_budget is not None else _env_int("NANOBOT_TOKEN_BUDGET", 4096)
+
         # Guidance block (kept short to save tokens)
         guide_lines = []
         if concise:
@@ -72,7 +92,8 @@ class ContextBuilder:
 
         # Hot-memory brief (compact)
         if session_key:
-            brief = self.hot.get_brief(session_key)
+            brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", 5)
+            brief = self.hot.get_brief(session_key, max_facts=brief_limit)
             if brief:
                 parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(f"- {l}" for l in brief))
 
@@ -84,7 +105,8 @@ class ContextBuilder:
         try:
             facts = load_index(self.workspace)
             if facts:
-                sel = select_relevant_facts(user_message or "", facts, limit=5)
+                facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
+                sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
                 if sel:
                     lines = [f"- {f.k}: {f.v}" for f in sel]
                     parts.append("# Relevant Facts\n\n" + "\n".join(lines))
@@ -235,13 +257,16 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        # Env override for keep_recent window
+        keep_recent = _env_int("NANOBOT_HISTORY_KEEP_RECENT", keep_recent)
+
         # Compress long history into a short brief and keep last K messages
         kept_history, summary_msg = self._summarize_history_brief(history or [], keep_recent=keep_recent)
 
         # Build with concise/tool-first hints and include hot-memory by session key
         session_key = f"{channel}:{chat_id}" if channel and chat_id else None
         system_prompt = self.build_system_prompt(
-            skill_names, current_message, concise=True, token_budget=4096, tool_first=True, session_key=session_key,
+            skill_names, current_message, concise=None, token_budget=None, tool_first=None, session_key=session_key,
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
