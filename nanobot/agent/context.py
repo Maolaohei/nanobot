@@ -90,8 +90,15 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
+        # Memory injector master switch and budget
+        mem_injector_enabled = _env_bool("NANOBOT_MEMORY_INJECTOR", True)
+        total_budget = _env_int("NANOBOT_MEMORY_BUDGET_MAX_LINES", 8)
+
+        hot_lines_out: list[str] = []
+        facts_lines_out: list[str] = []
+
         # Hot-memory brief with relevance×freshness budgeter (compact)
-        hot_enabled = _env_bool("NANOBOT_MEMORY_HOT_ENABLED", True)
+        hot_enabled = mem_injector_enabled and _env_bool("NANOBOT_MEMORY_HOT_ENABLED", True)
         if session_key and hot_enabled:
             brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", 5)
             try:
@@ -137,7 +144,7 @@ class ContextBuilder:
                 if hm.todos:
                     lines.append("Next: " + "; ".join(hm.todos[:2]))
                 if lines:
-                    parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(f"- {l}" for l in lines[: brief_limit + 3]))
+                    hot_lines_out = [f"- {l}" for l in lines[: brief_limit + 3]]
             except Exception:
                 # best-effort
                 pass
@@ -147,7 +154,7 @@ class ContextBuilder:
             parts.append(f"# Memory\n\n{memory}")
 
         # Relevant facts (from facts index)
-        facts_enabled = _env_bool("NANOBOT_MEMORY_FACTS_ENABLED", True)
+        facts_enabled = mem_injector_enabled and _env_bool("NANOBOT_MEMORY_FACTS_ENABLED", True)
         try:
             if facts_enabled:
                 facts = load_index(self.workspace)
@@ -155,11 +162,21 @@ class ContextBuilder:
                     facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
                     sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
                     if sel:
-                        lines = [f"- {f.k}: {f.v}" for f in sel]
-                        parts.append("# Relevant Facts\n\n" + "\n".join(lines))
+                        facts_lines_out = [f"- {f.k}: {f.v}" for f in sel]
         except Exception:
             # best-effort; ignore indexing failures
             pass
+
+        # Enforce combined memory injection budget by trimming facts first
+        if total_budget > 0:
+            remain = max(0, total_budget - len(hot_lines_out))
+            if len(facts_lines_out) > remain:
+                facts_lines_out = facts_lines_out[:remain]
+
+        if hot_lines_out:
+            parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(hot_lines_out))
+        if facts_lines_out:
+            parts.append("# Relevant Facts\n\n" + "\n".join(facts_lines_out))
 
         # Load always-active skills
         always_skills = self.skills.get_always_skills()

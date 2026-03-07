@@ -456,6 +456,22 @@ class AgentLoop:
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
+        # Round-level metrics logging (best-effort)
+        try:
+            from nanobot.metrics import snapshot
+            m = snapshot()
+            tp, tr = m.get("tokens_prompt", 0), m.get("tokens_response", 0)
+            http_calls = m.get("http_external_calls", 0)
+            http_hit = m.get("http_cache_hit", 0)
+            http_reval = m.get("http_cache_revalidated", 0)
+            hit_ratio = (http_hit + http_reval) / http_calls if http_calls else 0.0
+            logger.info(
+                "metrics: tokens_prompt={}, tokens_response={}, http_calls={}, hit_ratio={:.2f}",
+                tp, tr, http_calls, hit_ratio,
+            )
+        except Exception:
+            pass
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
