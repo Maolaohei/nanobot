@@ -115,6 +115,30 @@ uv tool install nanobot-ai
 pip install nanobot-ai
 ```
 
+## ⚙️ Minimal Env/Flags (Recommended)
+
+Use these environment variables for a minimal, token-efficient setup. Defaults are already baked into code; set only if you need to override.
+
+```
+NANOBOT_CONCISE_MODE=true
+NANOBOT_TOOL_FIRST=true
+NANOBOT_CACHE_ENABLED=true
+NANOBOT_HTTP_RATE_LIMIT_ENABLED=true
+NANOBOT_HISTORY_KEEP_RECENT=12
+NANOBOT_MEMORY_BUDGET_MAX_LINES=8
+NANOBOT_HOTMEMORY_LINES=4
+NANOBOT_MEMORY_FACTS_LIMIT=4
+NANOBOT_TOKEN_BUDGET=10240
+NANOBOT_USER_MEMORY_BUDGET=10240
+NANOBOT_USE_MINIMAL_BOOTSTRAP=true
+NANOBOT_INCLUDE_SKILL_DOCS=false
+# Optional (defaults off in minimal profile)
+NANOBOT__FEATURES__STRUCTURED_LOGGING=false
+NANOBOT_TRACING_ENABLED=false
+```
+
+See also: docs/RUNTIME_POLICY.md
+
 ## 🚀 Quick Start
 
 > [!TIP]
