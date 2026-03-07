@@ -19,4 +19,16 @@ if __name__ == "__main__":
     except Exception:
         pass
 
+    # AdapterHub wiring (non-fatal if config missing)
+    try:
+        from nanobot.config.schema import AppSettings
+        from nanobot.utils.adapter_wiring import build_adapter_hub
+
+        settings = AppSettings()  # pydantic-settings based
+        _adapter_hub = build_adapter_hub(settings)
+        _ = _adapter_hub  # keep reference for potential future use
+    except Exception:
+        # keep startup resilient
+        pass
+
     app()
