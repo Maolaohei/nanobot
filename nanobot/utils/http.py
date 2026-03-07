@@ -46,15 +46,25 @@ def _get_limiter() -> PerDomainLimiter | None:
     return _LIMITER
 
 
-def _limiter_hook(request: httpx.Request):
-    lim = _get_limiter()
-    if lim is None:
-        return
-    try:
-        host = request.url.host or ""
-        lim.throttle(host)
-    except Exception:
-        return
+- def _limiter_hook(request: httpx.Request):
+-    lim = _get_limiter()
+-    if lim is None:
+-        return
+-    try:
+-        host = request.url.host or ""
+-        lim.throttle(host)
+-    except Exception:
+-        return
++ async def _limiter_hook(request: httpx.Request) -> None:
++    """Async event hook for httpx to enforce per-domain rate limits."""
++    lim = _get_limiter()
++    if lim is None:
++        return None
++    try:
++        host = request.url.host or ""
++        lim.throttle(host)
++    except Exception:
++        return None
 
 
 def _cache_enabled_env() -> bool:
