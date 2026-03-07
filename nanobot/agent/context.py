@@ -5,7 +5,7 @@ import mimetypes
 import os
 import platform
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -90,26 +90,73 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        # Hot-memory brief (compact)
-        if session_key:
+        # Hot-memory brief with relevance×freshness budgeter (compact)
+        hot_enabled = _env_bool("NANOBOT_MEMORY_HOT_ENABLED", True)
+        if session_key and hot_enabled:
             brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", 5)
-            brief = self.hot.get_brief(session_key, max_facts=brief_limit)
-            if brief:
-                parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(f"- {l}" for l in brief))
+            try:
+                hm = self.hot.load(session_key)
+                lines: list[str] = []
+                if hm.goals:
+                    lines.append("Goal: " + "; ".join(hm.goals[:2]))
+                # score facts by relevance tokens + freshness bonus (last 72h)
+                facts = list(hm.facts or [])
+                msg = (user_message or "").strip()
+                tokens: list[str] = []
+                cur: list[str] = []
+                for ch in msg:
+                    if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"):
+                        cur.append(ch)
+                    else:
+                        if len(cur) >= 2:
+                            tokens.append("".join(cur))
+                        cur = []
+                if len(cur) >= 2:
+                    tokens.append("".join(cur))
+                now = datetime.now()
+                def _score(f: dict[str, Any]) -> float:
+                    base = f"{f.get('k','')} {f.get('v','')}"
+                    s = 0
+                    for t in tokens:
+                        if t and t in base:
+                            s += 2 if len(t) > 3 else 1
+                    ts = f.get("ts")
+                    try:
+                        dt = datetime.fromisoformat(str(ts)) if ts else None
+                    except Exception:
+                        dt = None
+                    if dt and (now - dt) <= timedelta(days=3):
+                        s += 1.0
+                    return float(s)
+                if facts:
+                    ranked = sorted(facts, key=_score, reverse=True)
+                    for f in ranked[:brief_limit]:
+                        lines.append(f"{f.get('k')}: {f.get('v')}")
+                if hm.constraints:
+                    lines.append("Constraints: " + "; ".join(hm.constraints[:2]))
+                if hm.todos:
+                    lines.append("Next: " + "; ".join(hm.todos[:2]))
+                if lines:
+                    parts.append("# Session Hot Memory (brief)\n\n" + "\n".join(f"- {l}" for l in lines[: brief_limit + 3]))
+            except Exception:
+                # best-effort
+                pass
 
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
         # Relevant facts (from facts index)
+        facts_enabled = _env_bool("NANOBOT_MEMORY_FACTS_ENABLED", True)
         try:
-            facts = load_index(self.workspace)
-            if facts:
-                facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
-                sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
-                if sel:
-                    lines = [f"- {f.k}: {f.v}" for f in sel]
-                    parts.append("# Relevant Facts\n\n" + "\n".join(lines))
+            if facts_enabled:
+                facts = load_index(self.workspace)
+                if facts:
+                    facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
+                    sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
+                    if sel:
+                        lines = [f"- {f.k}: {f.v}" for f in sel]
+                        parts.append("# Relevant Facts\n\n" + "\n".join(lines))
         except Exception:
             # best-effort; ignore indexing failures
             pass
