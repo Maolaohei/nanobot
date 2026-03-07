@@ -21,8 +21,7 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
 
 
-def _strip_tags(text: str) -> str:
-    """Remove HTML tags and decode entities."""
+def _strip_tags(text: str) -> str:\n    """Remove HTML tags and decode entities."""
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
     text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
     text = re.sub(r'<[^>]+>', '', text)
@@ -146,7 +145,12 @@ class WebFetchTool(Tool):
         self._cache = SimpleCache()
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        from readability import Document
+-        from readability import Document
++        # Try optional readability dependency; degrade gracefully
++        try:
++            from readability import Document  # type: ignore
++        except Exception:
++            Document = None  # type: ignore
 
         max_chars = maxChars or self.max_chars
         is_valid, error_msg = _validate_url(url)
@@ -198,11 +202,24 @@ class WebFetchTool(Tool):
 
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
-            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+-            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
+-                doc = Document(r.text)
+-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
+-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
+-                extractor = "readability"
++            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
++                if Document is not None:
++                    doc = Document(r.text)
++                    summary = doc.summary() if hasattr(doc, "summary") else r.text
++                    title = doc.title() if hasattr(doc, "title") else ""
++                    content = self._to_markdown(summary) if extractMode == "markdown" else _strip_tags(summary)
++                    text = f"# {title}\n\n{content}" if title else content
++                    extractor = "readability"
++                else:
++                    # Fallback: quick-and-dirty extraction by stripping tags
++                    content = self._to_markdown(r.text) if extractMode == "markdown" else _strip_tags(r.text)
++                    text = content
++                    extractor = "fallback"
             else:
                 text, extractor = r.text, "raw"
 

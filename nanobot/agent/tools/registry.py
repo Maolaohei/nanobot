@@ -1,6 +1,7 @@
 """Tool registry for dynamic tool management."""
 
 from typing import Any
+import inspect
 
 from nanobot.agent.tools.base import Tool
 
@@ -46,12 +47,14 @@ class ToolRegistry:
         try:
             # Attempt to cast parameters to match schema types
             params = tool.cast_params(params)
-            
+
             # Validate parameters
             errors = tool.validate_params(params)
             if errors:
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
-            result = await tool.execute(**params)
+            # Support both async and sync execute implementations defensively
+            maybe = tool.execute(**params)
+            result = await maybe if inspect.isawaitable(maybe) else maybe
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
             return result
