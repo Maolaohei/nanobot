@@ -9,6 +9,7 @@ import httpx
 from loguru import logger
 
 from nanobot.utils.cache import SimpleCache, CACHEABLE_CT
+from nanobot.utils.rate_limiter import PerDomainLimiter
 
 SAFE_STATUS_NO_RETRY = {401, 403, 404, 412}
 DEFAULT_TIMEOUT = httpx.Timeout(30.0)
@@ -19,6 +20,39 @@ DEFAULT_HEADERS = {
 
 # Global cache (enabled by default). Toggle via env NANOBOT_CACHE_ENABLED=false
 _GLOBAL_CACHE: SimpleCache | None = None
+
+# Global per-domain limiter (lazy init)
+_LIMITER: PerDomainLimiter | None = None
+
+
+def _rate_limit_enabled_env() -> bool:
+    v = os.environ.get("NANOBOT_HTTP_RATE_LIMIT_ENABLED", "false").lower()
+    return v not in {"0", "false", "no"}
+
+
+def _get_limiter() -> PerDomainLimiter | None:
+    global _LIMITER
+    if _LIMITER is not None:
+        return _LIMITER
+    try:
+        if _rate_limit_enabled_env():
+            _LIMITER = PerDomainLimiter(1.0, 5)
+        else:
+            _LIMITER = None
+    except Exception:
+        _LIMITER = PerDomainLimiter(1.0, 5) if _rate_limit_enabled_env() else None
+    return _LIMITER
+
+
+def _limiter_hook(request: httpx.Request):
+    lim = _get_limiter()
+    if lim is None:
+        return
+    try:
+        host = request.url.host or ""
+        lim.throttle(host)
+    except Exception:
+        return
 
 
 def _cache_enabled_env() -> bool:
@@ -83,6 +117,7 @@ class HttpClientFactory:
             headers=DEFAULT_HEADERS.copy(),
             proxy=self.proxy,
             follow_redirects=True,
+            event_hooks={"request": [_limiter_hook]},
         )
         return self._wrap(client)
 
@@ -142,6 +177,7 @@ async def request(
             headers={**DEFAULT_HEADERS, **headers},
             proxy=proxy,
             follow_redirects=True,
+            event_hooks={"request": [_limiter_hook]},
         )
         # Note: headers passed to request() still apply below
     try:
