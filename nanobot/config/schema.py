@@ -331,10 +331,10 @@ class ToolsConfig(Base):
 class FeatureFlags(Base):
     """Global feature flags (env-overridable)."""
 
-    structured_logging: bool = True
+    structured_logging: bool = False  # minimal profile: default off
     http_middleware: bool = True
     enable_tracing: bool = False
-    enforce_precommit: bool = True
+    enforce_precommit: bool = False  # minimal profile: default off
 
 
 class Config(BaseSettings):
@@ -428,3 +428,6 @@ class Config(BaseSettings):
         return None
 
     model_config = ConfigDict(env_prefix="NANOBOT_", env_nested_delimiter="__")
+
+# Backwards-compatible alias used by __main__ wiring
+AppSettings = Config

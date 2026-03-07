@@ -14,6 +14,7 @@ from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.hot_memory import HotMemoryStore  # added
 from nanobot.agent.facts_index import load_index, select_relevant_facts  # added
 from nanobot.utils.helpers import detect_image_mime
+from nanobot import runtime_policy as RP
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -35,7 +36,8 @@ class ContextBuilder:
 
     # Default bootstrap files (can be overridden by config)
     DEFAULT_BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    
+    MINIMAL_BOOTSTRAP_FILES = ["AGENTS.md", "SOUL_CORE.md", "USER.md", "TOOLS.md"]
+
     # Load custom config if exists
     _config_path = Path.home() / ".nanobot" / "context-override.json"
     if _config_path.exists():
@@ -70,10 +72,12 @@ class ContextBuilder:
         """Build the system prompt from identity, bootstrap files, memory, skills, and hints."""
         parts = [self._get_identity()]
 
-        # Env feature toggles
-        concise = concise if concise is not None else _env_bool("NANOBOT_CONCISE_MODE", True)
-        tool_first = tool_first if tool_first is not None else _env_bool("NANOBOT_TOOL_FIRST", True)
-        token_budget = token_budget if token_budget is not None else _env_int("NANOBOT_TOKEN_BUDGET", 4096)
+        # Env feature toggles (fallback to runtime policy defaults)
+        concise = concise if concise is not None else _env_bool("NANOBOT_CONCISE_MODE", RP.CONCISE_MODE)
+        tool_first = tool_first if tool_first is not None else _env_bool("NANOBOT_TOOL_FIRST", RP.TOOL_FIRST)
+        token_budget = token_budget if token_budget is not None else _env_int("NANOBOT_TOKEN_BUDGET", RP.TOKEN_BUDGET)
+        use_minimal_bootstrap = _env_bool("NANOBOT_USE_MINIMAL_BOOTSTRAP", RP.USE_MINIMAL_BOOTSTRAP_DEFAULT)
+        include_skill_docs = _env_bool("NANOBOT_INCLUDE_SKILL_DOCS", RP.INCLUDE_SKILL_DOCS_DEFAULT)
 
         # Guidance block (kept short to save tokens)
         guide_lines = []
@@ -86,13 +90,13 @@ class ContextBuilder:
         if guide_lines:
             parts.append("# Guidance\n\n" + "\n".join(guide_lines))
 
-        bootstrap = self._load_bootstrap_files()
+        bootstrap = self._load_bootstrap_files(use_minimal_bootstrap=use_minimal_bootstrap)
         if bootstrap:
             parts.append(bootstrap)
 
         # Memory injector master switch and budget
         mem_injector_enabled = _env_bool("NANOBOT_MEMORY_INJECTOR", True)
-        total_budget = _env_int("NANOBOT_MEMORY_BUDGET_MAX_LINES", 8)
+        total_budget = _env_int("NANOBOT_MEMORY_BUDGET_MAX_LINES", RP.MEMORY_BUDGET_MAX_LINES)
 
         hot_lines_out: list[str] = []
         facts_lines_out: list[str] = []
@@ -100,7 +104,7 @@ class ContextBuilder:
         # Hot-memory brief with relevance×freshness budgeter (compact)
         hot_enabled = mem_injector_enabled and _env_bool("NANOBOT_MEMORY_HOT_ENABLED", True)
         if session_key and hot_enabled:
-            brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", 5)
+            brief_limit = _env_int("NANOBOT_HOTMEMORY_LINES", RP.HOTMEMORY_LINES)
             try:
                 hm = self.hot.load(session_key)
                 lines: list[str] = []
@@ -159,7 +163,7 @@ class ContextBuilder:
             if facts_enabled:
                 facts = load_index(self.workspace)
                 if facts:
-                    facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", 5)
+                    facts_limit = _env_int("NANOBOT_MEMORY_FACTS_LIMIT", RP.FACTS_LIMIT)
                     sel = select_relevant_facts(user_message or "", facts, limit=facts_limit)
                     if sel:
                         facts_lines_out = [f"- {f.k}: {f.v}" for f in sel]
@@ -178,35 +182,36 @@ class ContextBuilder:
         if facts_lines_out:
             parts.append("# Relevant Facts\n\n" + "\n".join(facts_lines_out))
 
-        # Load always-active skills
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        if include_skill_docs:
+            # Load always-active skills
+            always_skills = self.skills.get_always_skills()
+            if always_skills:
+                always_content = self.skills.load_skills_for_context(always_skills)
+                if always_content:
+                    parts.append(f"# Active Skills\n\n{always_content}")
 
-        # Lazy-load skills based on user message keywords
-        matched_skills = []
-        if user_message:
-            matched_skills = self.skills.match_skills_by_keywords(user_message)
-            # Remove already-loaded always_skills
-            matched_skills = [s for s in matched_skills if s not in always_skills]
-        
-        # Also load explicitly requested skills
-        if skill_names:
-            for name in skill_names:
-                if name not in always_skills and name not in matched_skills:
-                    matched_skills.append(name)
-        
-        if matched_skills:
-            matched_content = self.skills.load_skills_for_context(matched_skills)
-            if matched_content:
-                parts.append(f"# Matched Skills\n\n{matched_content}")
+            # Lazy-load skills based on user message keywords
+            matched_skills = []
+            if user_message:
+                matched_skills = self.skills.match_skills_by_keywords(user_message)
+                # Remove already-loaded always_skills
+                matched_skills = [s for s in matched_skills if s not in always_skills]
+            
+            # Also load explicitly requested skills
+            if skill_names:
+                for name in skill_names:
+                    if name not in always_skills and name not in matched_skills:
+                        matched_skills.append(name)
+            
+            if matched_skills:
+                matched_content = self.skills.load_skills_for_context(matched_skills)
+                if matched_content:
+                    parts.append(f"# Matched Skills\n\n{matched_content}")
 
-        # Skills summary (compact index)
-        skills_summary = self.skills.build_skills_summary(include_triggers=True)
-        if skills_summary:
-            parts.append(f"""# Skills
+            # Skills summary (compact index)
+            skills_summary = self.skills.build_skills_summary(include_triggers=True)
+            if skills_summary:
+                parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
@@ -254,11 +259,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
-    def _load_bootstrap_files(self) -> str:
+    def _load_bootstrap_files(self, *, use_minimal_bootstrap: bool = False) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
 
-        for filename in self.BOOTSTRAP_FILES:
+        files = self.MINIMAL_BOOTSTRAP_FILES if use_minimal_bootstrap else self.BOOTSTRAP_FILES
+        for filename in files:
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
@@ -308,7 +314,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         channel: str | None = None,
         chat_id: str | None = None,
         *,
-        keep_recent: int = 15,
+        keep_recent: int = RP.HISTORY_KEEP_RECENT,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)

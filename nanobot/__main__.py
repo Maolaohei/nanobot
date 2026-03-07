@@ -2,20 +2,25 @@
 Entry point for running nanobot as a module: python -m nanobot
 """
 
+import os
+
 from nanobot.utils.log_setup import setup_logging_json
 from nanobot.utils.tracing import setup_tracing
 from nanobot.cli.commands import app
+from nanobot import runtime_policy as RP
 
 if __name__ == "__main__":
-    # Minimal structured logging by default
+    # Structured logging optional by Feature Flag (defaults off in minimal profile)
     try:
-        setup_logging_json()
+        if os.environ.get("NANOBOT__FEATURES__STRUCTURED_LOGGING", "false").lower() not in {"0", "false", "no"}:
+            setup_logging_json()
     except Exception:
         pass
 
     # Optional tracing via env (no hard dependency)
     try:
-        setup_tracing()
+        if os.environ.get("NANOBOT_TRACING_ENABLED", "false").lower() not in {"0", "false", "no"}:
+            setup_tracing()
     except Exception:
         pass
 

@@ -27,7 +27,8 @@ _LIMITER: PerDomainLimiter | None = None
 
 
 def _rate_limit_enabled_env() -> bool:
-    v = os.environ.get("NANOBOT_HTTP_RATE_LIMIT_ENABLED", "false").lower()
+    # Default ON in minimal runtime policy; can be disabled by env
+    v = os.environ.get("NANOBOT_HTTP_RATE_LIMIT_ENABLED", "true").lower()
     return v not in {"0", "false", "no"}
 
 
