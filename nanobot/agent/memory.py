@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir
+from nanobot.agent.facts_index import build_index, save_index  # added
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
@@ -52,6 +53,7 @@ class MemoryStore:
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
+        self.workspace = workspace  # added
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -60,6 +62,13 @@ class MemoryStore:
 
     def write_long_term(self, content: str) -> None:
         self.memory_file.write_text(content, encoding="utf-8")
+        # Rebuild facts index for fast retrieval
+        try:
+            facts = build_index(content)
+            save_index(self.workspace, facts)
+            logger.info("memory_facts_index_built count={}", len(facts))
+        except Exception as e:
+            logger.debug("facts index build failed: {}", e)
 
     def append_history(self, entry: str) -> None:
         with open(self.history_file, "a", encoding="utf-8") as f:

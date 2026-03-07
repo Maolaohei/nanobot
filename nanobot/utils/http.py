@@ -10,6 +10,7 @@ from loguru import logger
 
 from nanobot.utils.cache import SimpleCache, CACHEABLE_CT
 from nanobot.utils.rate_limiter import PerDomainLimiter
+from nanobot.metrics import inc
 
 SAFE_STATUS_NO_RETRY = {401, 403, 404, 412}
 DEFAULT_TIMEOUT = httpx.Timeout(30.0)
@@ -157,6 +158,7 @@ async def request(
         if cache_entry and not cache_entry.expired():
             try:
                 text = Path(cache_entry.body_path).read_text(encoding="utf-8", errors="ignore")
+                inc("http_cache_hit")
                 logger.debug("HTTP cache hit fresh: {}", url)
                 return _cached_response(url, cache_entry, text)
             except Exception as ce:
@@ -181,6 +183,7 @@ async def request(
         )
         # Note: headers passed to request() still apply below
     try:
+        inc("http_external_calls")
         r = await client.request(method.upper(), url, headers=headers, **kwargs)
 
         # Revalidation: 304 => serve cached entity and refresh metadata
@@ -188,6 +191,7 @@ async def request(
             try:
                 _GLOBAL.refresh(url, dict(r.headers))
                 text = Path(cache_entry.body_path).read_text(encoding="utf-8", errors="ignore")
+                inc("http_cache_revalidated")
                 logger.debug("HTTP cache revalidated (304): {}", url)
                 return _cached_response(url, cache_entry, text)
             except Exception as ce:
