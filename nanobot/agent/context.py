@@ -10,6 +10,7 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.agent.hot_memory import HotMemoryStore  # added
 from nanobot.utils.helpers import detect_image_mime
 
 
@@ -38,6 +39,7 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self.hot = HotMemoryStore(workspace)  # added
 
     def build_system_prompt(
         self,
@@ -163,8 +165,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        # Build with concise/tool-first hints and include hot-memory by session key
+        session_key = f"{channel}:{chat_id}" if channel and chat_id else None
+        system_prompt = self.build_system_prompt(
+            skill_names, current_message, concise=True, token_budget=4096, tool_first=True, session_key=session_key,
+        )
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names, current_message)},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": merged},
         ]
