@@ -273,6 +273,45 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return "\n\n".join(parts) if parts else ""
 
     @staticmethod
+    def _repair_boundary_tool_pairs(history: list[dict[str, Any]], kept: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Prepend missing assistant tool-call messages for leading tool results.
+
+        When history is windowed, the kept slice can start with one or more
+        `tool` messages while the matching assistant `tool_calls` message sits
+        just outside the window. Strict APIs then reject the replay because a
+        function_call_output appears without a prior function_call.
+        """
+        if not kept or not history:
+            return kept
+
+        prefix: list[dict[str, Any]] = []
+        added_ids: set[str] = set()
+        index_by_call_id: dict[str, dict[str, Any]] = {}
+        for msg in history:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []) or []:
+                tc_id = tc.get("id") if isinstance(tc, dict) else None
+                if isinstance(tc_id, str) and tc_id:
+                    index_by_call_id.setdefault(tc_id, msg)
+
+        for msg in kept:
+            if msg.get("role") != "tool":
+                break
+            tc_id = msg.get("tool_call_id")
+            if not isinstance(tc_id, str) or not tc_id or tc_id in added_ids:
+                continue
+            parent = index_by_call_id.get(tc_id)
+            if parent and parent not in prefix:
+                prefix.append(parent)
+                added_ids.update(
+                    tc.get("id") for tc in (parent.get("tool_calls", []) or [])
+                    if isinstance(tc, dict) and isinstance(tc.get("id"), str)
+                )
+
+        return prefix + kept
+
+    @staticmethod
     def _summarize_history_brief(history: list[dict[str, Any]], keep_recent: int = 15, max_chars: int = 600) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         """Return (kept_history, summary_user_msg?).
 
@@ -283,6 +322,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             return history, None
         older = history[:-keep_recent]
         kept = history[-keep_recent:]
+        kept = ContextBuilder._repair_boundary_tool_pairs(history, kept)
         # Find last user and assistant contents in older slice
         def _last_of(role: str) -> str:
             for m in reversed(older):
@@ -292,7 +332,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         intent = _last_of("user")
         outcome = _last_of("assistant")
         def _clip(s: str, n: int) -> str:
-            s = s.replace(self._RUNTIME_CONTEXT_TAG, "").strip()
+            s = s.replace(ContextBuilder._RUNTIME_CONTEXT_TAG, "").strip()
             return (s[: n - 1] + "…") if len(s) > n else s
         lines = [
             f"Earlier summary: {len(older)} messages compressed",

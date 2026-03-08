@@ -2,8 +2,6 @@
 
 import hashlib
 import os
-import secrets
-import string
 from typing import Any
 
 import json_repair
@@ -17,11 +15,6 @@ from nanobot.providers.registry import find_by_model, find_gateway
 # Standard chat-completion message keys.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
 _ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
-_ALNUM = string.ascii_letters + string.digits
-
-def _short_tool_id() -> str:
-    """Generate a 9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
-    return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
 class LiteLLMProvider(LLMProvider):
@@ -304,13 +297,15 @@ class LiteLLMProvider(LLMProvider):
 
         tool_calls = []
         for tc in raw_tool_calls:
-            # Parse arguments from JSON string if needed
+            # Preserve provider-issued tool_call.id exactly. Rewriting it breaks
+            # the assistant tool_calls[] ↔ tool tool_call_id linkage for strict
+            # APIs (for example Codex Responses), causing 400 invalid_request.
             args = tc.function.arguments
             if isinstance(args, str):
                 args = json_repair.loads(args)
 
             tool_calls.append(ToolCallRequest(
-                id=_short_tool_id(),
+                id=tc.id,
                 name=tc.function.name,
                 arguments=args,
             ))
